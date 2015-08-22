@@ -1,0 +1,193 @@
+/*
+[Title] High Resource Detection
+[Author] 이이백(Yi-Beck Lee)
+*/
+
+/*libname AnlIn "C:\BAK_ANALYTICS\IN_DATA" ;*/
+/*libname AnlOut "C:\BAK_ANALYTICS\OUT_DATA" ;*/
+%macro baInData(baInLib, baInData, baStartDT, baEndDT, baOutLib, baOutData) ;
+data _null_ ;
+lStartDT = %str("&baStartDT"dt) ;
+lEndDT = %str("&baEndDT"dt) ;
+call symput('lStartDT', lStartDT) ;
+call symput('lEndDT', lEndDT) ;
+run ;
+data &baInData(drop= mu sigma) ;
+mu = 50 ;
+sigma = 3 ;
+do DateTime = &lStartDT to &lEndDT by 0.1 ;
+	HOST01  = abs(mu + rand('NORMAL')**sigma*0.9 + (mu + rand('LOGNORMAL')**sigma)*0.04) ;
+	HOST02  = abs((mu + rand('NORMAL')**sigma)*1 + HOST01*0.5) ;
+	HOST03  = abs((mu + rand('NORMAL')**sigma)*1 + HOST01*0.01 + HOST02*0.2) ;
+	HOST04  = abs((mu + rand('NORMAL')**sigma)*0.5 + HOST01*0.15 + HOST02*0.15+ HOST03*0.1) ;
+	HOST05  = (abs((mu + rand('NORMAL')**sigma)*0.01 + HOST01*0.005 + HOST02*0.05 + HOST03*02))/2.2 ;
+	HOST06  = (abs((mu + rand('NORMAL')**sigma)*0.01 + HOST01*0.005 + HOST04*0.05 + HOST05*02))/2.2 ;
+	HOST07  = (abs((mu + rand('NORMAL')**sigma)*0.01 + HOST01*0.005 + HOST05*0.05 + HOST06*02))/2.2 ;
+	HOST08  = (abs((mu + rand('NORMAL')**sigma)*0.01 + HOST01*0.005 + HOST06*0.05 + HOST07*02))/2.2 ;
+	HOST09  = (abs((mu + rand('NORMAL')**sigma)*0.01 + HOST01*0.005 + HOST07*0.05 + HOST08*02))/2 ;
+	HOST10  = (abs((mu + rand('NORMAL')**sigma)*0.01 + HOST01*0.005 + HOST08*0.05 + HOST09*02))/2 ;
+	if  '2015-08-01 12:00:00.0'dt <= DateTime <= '2015-08-01 12:00:30.0'dt then HOST01=  80 + abs(rand('NORMAL')**sigma) ;
+	output ;
+end ;
+run ;
+data &baOutLib..&baOutdata ;
+attrib DateTime format = e8601dt21.1 ;
+set &baIndata ;
+HOST01 = max(min(HOST01,99.8),0) ;
+HOST02 = max(min(HOST02,99.5),0) ;
+HOST03 = max(min(HOST03,98.9),0) ;
+HOST04 = max(min(HOST04,99.3),0) ;
+HOST05 = max(min(HOST05,99.8),0) ;
+HOST06 = max(min(HOST06,99.8),0) ;
+HOST07 = max(min(HOST07,99.8),0) ;
+HOST08 = max(min(HOST08,99.8),0) ;
+HOST09 = max(min(HOST09,99.8),0) ;
+HOST10 = max(min(HOST10,99.8),0) ;
+run ;
+%mend ;
+
+%macro baDT(baInLib, baInData, baTarget, baInput, baSplitMethod, baMaxRule, baLeafSize) ;
+proc arbor data =  &baInLib..&baInData
+Criterion = &baSplitMethod
+LEAFSIZE = &baLeafSize
+MAXRULES = &baMaxRule
+;
+Performance DISK
+NodeSize=2000000
+;
+target &baTarget / level= interval ;
+input &baInput / level=interval ;
+DESCRIBE File="C:\Users\e200\Documents\BA_Lib\Output\RULE_&baTarget..txt";
+code file="C:\Users\e200\Documents\BA_Lib\Output\RULE_&baTarget..sas" ;
+/*save*/
+/*MODEL=&baTarget._Tree */
+/*SEQUENCE=&baTarget._TreeSeq*/
+/*IMPORTANCE=&baTarget._Importance*/
+/*NODESTAT=&baTarget._Tree_NodeStat*/
+/*SUMMARY=&baTarget._Tree_Summary*/
+/*;*/
+run ;
+quit ;
+%mend ;
+%macro baHighResourceDetection(baInLib, baInData, baTargets, baInputs, baOutLib, baOutData) ;
+options nolabel ;
+%let lTargets = ;
+%let i = 1 ;
+%do %while(%scan(&baTargets,&i) ne );
+	%let lUnitTarget = %scan(&baTargets,&i) ;
+	%put &lUnitTarget ;
+	%baDT(baInLib=&baInLib, baInData=&baIndata, baTarget=&lUnitTarget, baInput=&baInputs, baSplitMethod=variance, baMaxRule=1000, baLeafSize=200) ;
+	data &lUnitTarget._PRED(keep = TARGET_NAME DateTime VALUE PRED_VALUE _NODE_ _LEAF_ ) ;
+	 rename &lUnitTarget = VALUE P_&lUnitTarget = PRED_VALUE ;
+	 retain TARGET_NAME DateTime &lUnitTarget P_&lUnitTarget _NODE_ _LEAF_ ;
+	 set &baInLib..&baInData ;
+	 TARGET_NAME = "&lUnitTarget" ;
+	 %include "C:\Users\e200\Documents\BA_Lib\Output\RULE_&lUnitTarget..sas" ;
+	run ;
+	%let i = %eval(&i + 1) ;
+	%let lTargets = &lTargets  &lUnitTarget._PRED ;
+%end ;
+data &mOutLib..&mInData._PRED ;
+set &lTargets ;
+run ;
+proc means data = &mOutLib..&mInData._PRED n mean std min p1 p5 p10 p25 mean median p75 p90 p95 p99 max kurtosis skew maxdec=2 noprint  ;
+format mean std min p1 p5 p10 q1 q2 median q3 p90 p95 p99 max kurt skew 10.2 ;
+format _FREQ_ comma10. ;
+class TARGET_NAME _LEAF_ _NODE_  ;
+var VALUE ;
+output out = &mOutLib..DT_NODE_STAT mean=mean std=std kurt=kurt skew=skew min=min p1=p1 p5=p5 p10=p10 p25=q1 mean=q2 median=median p75=q3 p90=p90 p95=p95 p99=p99 max=max ;
+run ;
+proc sql ;
+create table &mOutLib..&baOutData as
+select 	T1.TARGET_NAME
+	, 	T2.BEGIN_DT
+	, 	T2.END_DT
+	,	T2.END_DT - T2.BEGIN_DT as PERIOD format = e8601tz11.3
+	, 	T1._FREQ_ as FREQ
+	, 	T1.MEAN
+	, 	T1.STD
+	, 	T1.MIN
+	, 	T1.P5
+	, 	T1.P10
+	, 	T1.P90
+	, 	T1.P95
+	, 	T1.MAX
+from	&mOutLib..DT_NODE_STAT T1
+inner join (select 	TARGET_NAME, _NODE_, _LEAF_
+				,	min(DateTime)as BEGIN_DT format = e8601dt21.1
+				, 	max(DateTime)as END_DT format = e8601dt21.1
+				,	count(*) as NUM_TR 
+			from &mOutLib..&mInData._PRED
+			group by TARGET_NAME, _NODE_, _LEAF_ 
+			) T2
+on 	T1.TARGET_NAME=T2.TARGET_NAME
+and	T1._LEAF_=T2._LEAF_
+and T1._NODE_=T2._NODE_
+/*order by T1.TARGET_NAME, T2.BEGIN_DT  */
+order by T1.TARGET_NAME, T1.MEAN desc, T1.STD desc  
+;
+quit ;
+
+%mend ;
+%macro baHighResourceExplore(baInLib, baIndata, baTarget, baCompObjects, baStartTime, baEndTime, baOutLib, baOutdata) ;
+filename odsout  "C:\BAK_ANALYTICS\OUT_FILE\" ;
+goptions reset=all border device=gif;
+ods html path=odsout
+         body="RPT_HostResource.html"
+         nogtitle;
+
+proc corr data = &baInLib..&baIndata out= corr noprint ;
+where &baStartTime.dt <= DateTime <= &baEndTime.dt ;
+var &baTarget &baCompObjects ;
+run ;
+proc sql ;
+create table &baOutLib..&baOutdata._&baTarget._Corr as
+select 	case
+			when _TYPE_ = 'CORR' then '상관계수'
+			else ''
+		end as AnalyticName
+	, 	_NAME_ as Object
+	, 	&baTarget
+from CORR 
+where _TYPE_ = 'CORR'
+order by &baTarget desc
+;
+select * from &baOutLib..&baOutdata._&baTarget._Corr ;
+quit ;
+title nearist object of &baTarget ;
+proc sql ;
+select Object into :lNearistObject from &baOutLib..&baOutdata._&baTarget._Corr where &baTarget = (select max(&baTarget) from CORR where _TYPE_ = 'CORR' and _NAME_ ne "&baTarget") ;
+quit ;
+
+%put lNearistObject = &lNearistObject ;
+
+symbol1 interpol=spline height=0.5 cm width=0.5 ; 
+proc gplot data = &baInLib..&baIndata ;
+where &baStartTime.dt <= DateTime <= &baEndTime.dt ;
+plot &baTarget * DateTime ;
+plot &lNearistObject * DateTime ;
+run ;
+
+proc gplot data = &baInLib..&baIndata ;
+where &baStartTime.dt <= DateTime <= &baEndTime.dt ;
+plot &baTarget * DateTime ;
+plot2 &lNearistObject * DateTime ;
+run ;
+
+%let i = 1 ;
+%do %while(%scan(&baCompObjects,&i) ne );
+	%let lUnitObject = %scan(&baCompObjects,&i) ;
+	%put &lUnitObject ;
+
+symbol1 interpol=none v=dot height=0.25 cm width=0.25 ; 
+proc gplot data = &baInLib..&baIndata ;
+where &baStartTime.dt <= DateTime <= &baEndTime.dt ;
+plot &baTarget * &lUnitObject ;
+run ;
+	%let i = %eval(&i + 1) ;
+%end ;
+filename ImgOut clear;
+ods html close ;
+title ;
+quit ;
+%mend ;
